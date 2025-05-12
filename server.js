@@ -5,21 +5,25 @@ const path = require("path");
 const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
-ffmpeg.setFfmpegPath(ffmpegPath);
+const cors = require("cors");
 
+
+ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(cors());
 
 // Directories
 const uploadDir = path.join(__dirname, "uploads");
 const processedDir = path.join(__dirname, "processed");
-const fontPath = path.join(__dirname, "fonts", "DejaVuSans-Bold.ttf"); // make sure this font exists
+const fontPath = path.join(__dirname, "fonts", "DejaVuSans-Bold.ttf"); 
 
-fs.mkdirSync(uploadDir, { recursive: true });
-fs.mkdirSync(processedDir, { recursive: true });
+// Ensure directories exist
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(processedDir)) fs.mkdirSync(processedDir, { recursive: true });
 
 // Utility functions
 function wrapText(text, maxLength = 30) {
@@ -41,10 +45,12 @@ function wrapText(text, maxLength = 30) {
 
 function escapeText(text) {
     return text
-        .replace(/\\/g, "\\\\")
-        .replace(/:/g, "\\:")
-        .replace(/'/g, "\\'")
-        .replace(/\n/g, "\\n");
+        .replace(/\\/g, "\\\\")   // backslash
+        .replace(/:/g, "\\:")     // colon
+        .replace(/,/g, "\\,")     // comma
+        .replace(/\./g, "\\.")    // dot
+        .replace(/'/g, "\\'")     // single quote
+        .replace(/\n/g, "\\n");   // newline
 }
 
 // FFmpeg logic
@@ -52,9 +58,9 @@ function processVideoWithBackground(videoPath, backgroundPath, outputPath, textD
     return new Promise((resolve, reject) => {
         const { doctorName = "", degree = "", mobile = "", address = "" } = textData;
 
-        const textBlock = escapeText(
+        const textBlock = `'${escapeText(
             `${wrapText(`Doctor: ${doctorName}`)}\n${wrapText(`Mobile: ${mobile}`)}\n${wrapText(`Address: ${address}`)}\n${wrapText(`Degree: ${degree}`)}`
-        );
+        )}'`;
 
         ffmpeg()
             .input(backgroundPath)
