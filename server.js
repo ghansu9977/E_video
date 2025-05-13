@@ -7,7 +7,6 @@ const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const cors = require("cors");
 
-
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,20 +18,20 @@ app.use(cors());
 // Directories
 const uploadDir = path.join(__dirname, "uploads");
 const processedDir = path.join(__dirname, "processed");
-const fontPath = path.join(__dirname, "fonts", "DejaVuSans-Bold.ttf"); 
+const fontPath = path.join(__dirname, "fonts", "DejaVuSans-Bold.ttf");
 
 // Ensure directories exist
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(processedDir)) fs.mkdirSync(processedDir, { recursive: true });
 
 // Utility functions
-function wrapText(text, maxLength = 30) {
+function wrapText(text, maxLength = 50) {
     const words = text.split(" ");
     let lines = [];
     let currentLine = words[0];
 
     for (let i = 1; i < words.length; i++) {
-        if ((currentLine + " " + words[i]).length <= maxLength) {
+        if (currentLine.length + words[i].length + 1 <= maxLength) {
             currentLine += " " + words[i];
         } else {
             lines.push(currentLine);
@@ -44,23 +43,23 @@ function wrapText(text, maxLength = 30) {
 }
 
 function escapeText(text) {
-    return text
-        .replace(/\\/g, "\\\\")   // backslash
-        .replace(/:/g, "\\:")     // colon
-        .replace(/,/g, "\\,")     // comma
-        .replace(/\./g, "\\.")    // dot
-        .replace(/'/g, "\\'")     // single quote
-        .replace(/\n/g, "\\n");   // newline
+    return `'${text
+        .replace(/\\/g, "\\\\")
+        .replace(/:/g, "\\:")
+        .replace(/'/g, "\\'")}'`;
 }
 
 // FFmpeg logic
-function processVideoWithBackground(videoPath, backgroundPath, outputPath, textData = {}) {
+async function processVideoWithBackground(videoPath, backgroundPath, outputPath, textData = {}) {
     return new Promise((resolve, reject) => {
         const { doctorName = "", degree = "", mobile = "", address = "" } = textData;
 
-        const textBlock = `'${escapeText(
-            `${wrapText(`Doctor: ${doctorName}`)}\n${wrapText(`Mobile: ${mobile}`)}\n${wrapText(`Address: ${address}`)}\n${wrapText(`Degree: ${degree}`)}`
-        )}'`;
+        const wrappedDoctorName = wrapText(`Doctor: ${doctorName}`);
+        const wrappedMobile = wrapText(`Mobile: ${mobile}`);
+        const wrappedAddress = wrapText(`Address: ${address}`);
+        const wrappedDegree = wrapText(`Degree: ${degree}`);
+
+        const textBlock = escapeText(`${wrappedDoctorName}\n${wrappedMobile}\n${wrappedAddress}\n${wrappedDegree}`);
 
         ffmpeg()
             .input(backgroundPath)
@@ -70,29 +69,46 @@ function processVideoWithBackground(videoPath, backgroundPath, outputPath, textD
                 "[1:v]scale=-1:720[vid]",
                 "[bg][vid]overlay=x=(W-w)/2:y=0[tmp]",
                 {
+                    filter: "drawbox",
+                    options: {
+                        x: 0,
+                        y: "h-(h-1000)/2",
+                        width: "iw",
+                        height: 170,
+                        color: "black@1.0",
+                        t: "fill",
+                    },
+                    inputs: "tmp",
+                    outputs: "boxed",
+                },
+                {
                     filter: "drawtext",
                     options: {
                         fontfile: fontPath,
                         text: textBlock,
-                        fontsize: 20,
+                        fontsize: 24,
                         fontcolor: "white",
-                        box: 1,
-                        boxcolor: "black@0.8",
-                        boxborderw: 20,
-                        x: 50,
-                        y: "h-text_h",
+                        box: 0,
+                        x: "(w-text_w)/2",
+                        y: "h-90",
                         line_spacing: 10,
                         fix_bounds: 1,
                     },
-                    inputs: "tmp",
+                    inputs: "boxed",
                     outputs: "final",
                 },
             ])
             .outputOptions(["-map", "[final]", "-map", "1:a?", "-c:a", "copy", "-y"])
             .output(outputPath)
-            .on("start", (cmd) => console.log("Running FFmpeg:", cmd))
-            .on("end", () => resolve())
-            .on("error", (err) => reject(err))
+            .on("start", (cmd) => console.log("Processing started:", cmd))
+            .on("end", () => {
+                console.log("Successfully processed:", outputPath);
+                resolve();
+            })
+            .on("error", (err) => {
+                console.error("Processing failed:", err);
+                reject(err);
+            })
             .run();
     });
 }
@@ -118,39 +134,44 @@ const upload = multer({
 // Upload API
 app.post("/upload", (req, res) => {
     upload(req, res, async (err) => {
-        if (err) return res.status(400).send({ error: err.message });
-
-        const { doctorName, degree, mobile, address } = req.body;
-        const videoFile = req.files?.video?.[0];
-        const bgFile = req.files?.background?.[0];
-
-        if (!videoFile || !bgFile || !doctorName || !degree || !mobile || !address) {
-            return res.status(400).send({ error: "All fields and files are required." });
-        }
-
-        const outputPath = path.join(processedDir, `output_${Date.now()}.mp4`);
-
         try {
-            await processVideoWithBackground(videoFile.path, bgFile.path, outputPath, {
+            if (err) return res.status(400).send({ error: err.message });
+            if (!req.files || !req.files.video)
+                return res.status(400).send({ error: "No video file uploaded" });
+
+            const { doctorName, degree, mobile, address } = req.body;
+            if (!doctorName || !degree || !mobile || !address) {
+                if (req.files.video) fs.unlinkSync(req.files.video[0].path);
+                if (req.files.background) fs.unlinkSync(req.files.background[0].path);
+                return res.status(400).send({ error: "All fields are required" });
+            }
+
+            const videoPath = req.files.video[0].path;
+            const backgroundPath = req.files.background ? req.files.background[0].path : null;
+            const safeFilename = `output_${Date.now()}.mp4`;
+            const outputPath = path.join(processedDir, safeFilename);
+
+            await processVideoWithBackground(videoPath, backgroundPath, outputPath, {
                 doctorName,
                 degree,
                 mobile,
                 address,
             });
 
-            // Clean up uploads
-            fs.unlinkSync(videoFile.path);
-            fs.unlinkSync(bgFile.path);
+            // Cleanup
+            if (req.files.background) fs.unlinkSync(req.files.background[0].path);
+            fs.unlinkSync(videoPath);
 
-            const outputName = path.basename(outputPath);
-            res.send({
-                message: "Video processed successfully.",
-                file: outputName,
-                downloadUrl: `/processed/${outputName}`,
+            res.status(200).send({
+                message: "Video processed successfully",
+                file: safeFilename,
+                downloadUrl: `/processed/${safeFilename}`,
             });
         } catch (error) {
-            console.error("FFmpeg Error:", error.message);
-            res.status(500).send({ error: "Video processing failed." });
+            console.error("Processing error:", error);
+            if (req.files?.video) fs.unlinkSync(req.files.video[0].path);
+            if (req.files?.background) fs.unlinkSync(req.files.background[0].path);
+            res.status(500).send({ error: error.message });
         }
     });
 });
